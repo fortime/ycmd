@@ -22,6 +22,7 @@ import os
 import shutil
 import tempfile
 import threading
+from urllib.parse import urlparse
 
 from ycmd import responses, utils
 from ycmd.completers.language_server import language_server_protocol as lsp
@@ -642,3 +643,64 @@ class JavaCompleter( language_server_completer.LanguageServerCompleter ):
 
   def GetCommandLine( self ):
     return self._command
+
+
+  def _GoToRequest( self, request_data, handler ):
+    result = super()._GoToRequest( request_data, handler )
+    new_result = []
+    for item in result:
+      if item[ 'uri' ].startswith( 'jdt://' ):
+        try:
+          local_file_uri = self._WriteToLocalFile( item[ 'uri' ] )
+          item[ 'uri' ] = local_file_uri
+        except Exception:
+          LOGGER.warn(
+            'Write jdt uri[%s] to local failed',
+            item[ 'uri' ],
+            exc_info = True )
+          continue
+      new_result.append( item )
+    if not new_result:
+      raise RuntimeError( 'Cannot jump to location' )
+    return new_result
+
+
+  def _WriteToLocalFile( self, uri ):
+    parsed_uri = urlparse( uri )
+    ( _, jar_name, package, file_name ) = parsed_uri.path.split( '/' )
+    path_items = [ 'dep-sources', jar_name ]
+    path_items.extend( package.split('.') )
+    local_file_parent_path = os.path.join( self._workspace_path, *path_items )
+    if not os.path.exists( local_file_parent_path ):
+      os.makedirs( local_file_parent_path )
+
+    pos = file_name.find( '$' )
+    if pos != -1:
+      file_name = file_name[ :pos ]
+    pos = file_name.find( '.' )
+    if pos != -1:
+      file_name = file_name[ :pos ]
+    file_name += '.java'
+
+    local_file_path = os.path.join( local_file_parent_path, file_name )
+    if not os.path.exists( local_file_path ):
+      content = self._GetClassFileContents( uri )
+      try:
+        with open( local_file_path, 'wb' ) as local_file:
+          local_file.write( content.encode( 'utf8' ) )
+      except Exception:
+        if os.path.exists( local_file_path ):
+          os.remove( local_file_path )
+        raise
+    return lsp.FilePathToUri( local_file_path )
+
+
+  def _GetClassFileContents( self, uri ):
+    request_id = self.GetConnection().NextRequestId()
+    return self.GetConnection().GetResponse(
+      request_id,
+      lsp.BuildRequest(
+        request_id,
+        'java/classFileContents',
+        { 'uri': uri } ),
+      language_server_completer.REQUEST_TIMEOUT_COMMAND )[ 'result' ]
