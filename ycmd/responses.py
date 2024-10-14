@@ -16,6 +16,7 @@
 # along with ycmd.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
+from typing import Union
 from ycmd.utils import ProcessIsRunning
 
 
@@ -268,13 +269,60 @@ class FixIt:
     self.kind = kind
 
 
+class CreateFileOptions:
+
+  def __init__( self, overwrite: bool, ignore_if_exists: bool ):
+    self.overwrite = overwrite
+    self.ignore_if_exists = ignore_if_exists
+
+
+class CreateFile:
+
+  def __init__( self, path: str, options: CreateFileOptions ):
+    self.path = path
+    self.options = options
+
+
+class RenameFileOptions:
+
+  def __init__( self, overwrite: bool, ignore_if_exists: bool ):
+    self.overwrite = overwrite
+    self.ignore_if_exists = ignore_if_exists
+
+
+class RenameFile:
+
+  def __init__( self, old_path: str, new_path: str, options: RenameFileOptions ):
+    self.old_path = old_path
+    self.new_path = new_path
+    self.options = options
+
+
+class DeleteFileOptions:
+
+  def __init__( self, recursive: bool, ignore_if_not_exists: bool ):
+    self.recursive = recursive
+    self.ignore_if_not_exists = ignore_if_not_exists
+
+
+class DeleteFile:
+
+  def __init__( self, path: str, options: DeleteFileOptions ):
+    self.path = path
+    self.options = options
+
+
 class FixItChunk:
   """An individual replacement within a FixIt (aka Refactor)"""
 
-  def __init__( self, replacement_text: str, range: Range ):
+  def __init__( self,
+                replacement_text: str,
+                range: Range,
+                resource_op: Union[CreateFile, RenameFile, DeleteFile] = None ):
     """replacement_text of type string, range of type Range"""
     self.replacement_text = replacement_text
     self.range = range
+    self.resource_op = resource_op
 
 
 def BuildDiagnosticData( diagnostic ):
@@ -314,10 +362,53 @@ def BuildFixItResponse( fixits ):
   can be used to apply arbitrary changes to arbitrary files and is suitable for
   both quick fix and refactor operations"""
 
+  def BuildResourceOperationOptions( options ):
+    if isinstance( options, CreateFileOptions ):
+      return {
+        'overwrite': options.overwrite,
+        'ignore_if_exists': options.ignore_if_exists,
+      }
+    elif isinstance( options, RenameFileOptions ):
+      return {
+        'overwrite': options.overwrite,
+        'ignore_if_exists': options.ignore_if_exists,
+      }
+    elif isinstance( options, DeleteFileOptions ):
+      return {
+        'recursive': options.recursive,
+        'ignore_if_not_exists': options.ignore_if_not_exists,
+      }
+    else:
+      return None
+
+  def BuildResourceOperation( resource_op ):
+    if isinstance( resource_op, CreateFile ):
+      return {
+        'kind': 'create',
+        'path': resource_op.path,
+        'options': BuildResourceOperationOptions( resource_op.options ),
+      }
+    elif isinstance( resource_op, RenameFile ):
+      return {
+        'kind': 'rename',
+        'old_path': resource_op.old_path,
+        'new_path': resource_op.new_path,
+        'options': BuildResourceOperationOptions ( resource_op.options ),
+      }
+    elif isinstance( resource_op, DeleteFile ):
+      return {
+        'kind': 'delete',
+        'path': resource_op.path,
+        'options': BuildResourceOperationOptions ( resource_op.options ),
+      }
+    else:
+      return None
+
   def BuildFixitChunkData( chunk ):
     return {
       'replacement_text': chunk.replacement_text,
       'range': BuildRangeData( chunk.range ),
+      'resource_op': BuildResourceOperation( chunk.resource_op ),
     }
 
   def BuildFixItData( fixit ):

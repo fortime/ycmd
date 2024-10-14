@@ -49,6 +49,17 @@ CONNECTION_TIMEOUT         = 5
 # Size of the notification ring buffer
 MAX_QUEUED_MESSAGES = 250
 
+DUMMY_RANGE = {
+  'start': {
+      'line': 0,
+      'character': 0,
+  },
+  'end': {
+      'line': 0,
+      'character': 0,
+  },
+}
+
 PROVIDERS_MAP = {
   'codeActionProvider': (
     lambda self, request_data, args: self.GetCodeActions( request_data )
@@ -2861,8 +2872,12 @@ class LanguageServerCompleter( Completer ):
     fixits = []
     for code_action in code_actions:
       capabilities = self._server_capabilities[ 'codeActionProvider' ]
-      if ( ( isinstance( capabilities, dict ) and
-             capabilities.get( 'resolveProvider' ) ) or
+      is_resolve_provider = ( isinstance( capabilities, dict ) and
+                              capabilities.get( 'resolveProvider' ) )
+      edit = code_action.get( 'edit', {} )
+      has_edit = ( len( edit.get( 'changes', [] ) ) > 0 or
+                   len( edit.get( 'documentChanges', [] ) ) > 0 )
+      if ( ( is_resolve_provider and not has_edit ) or
            'command' in code_action ):
         # If server is a code action resolve provider, either we are obligated
         # to resolve, or we have a command in the code action response.
@@ -3045,6 +3060,7 @@ class LanguageServerCompleter( Completer ):
     if 'command' not in fixit:
       # Somebody has sent us an already resolved fixit.
       return { 'fixits': [ fixit ] }
+
     return self._ResolveFixit( request_data, request_data[ 'fixit' ] )
 
 
@@ -3562,6 +3578,33 @@ def _BuildDiagnostic( contents, uri, diag ):
     kind = lsp.SEVERITY[ diag.get( 'severity' ) or 1 ].upper() )
 
 
+def _BuildCreateFileOptions( resource_op ):
+  options = None
+  if 'options' in resource_op:
+    options = responses.CreateFileOptions(
+      resource_op[ 'options' ].get( 'overwrite' ),
+      resource_op[ 'options' ].get( 'ignoreIfExists' ) )
+  return options
+
+
+def _BuildRenameFileOptions( resource_op ):
+  options = None
+  if 'options' in resource_op:
+    options = responses.RenameFileOptions(
+      resource_op[ 'options' ].get( 'overwrite' ),
+      resource_op[ 'options' ].get( 'ignoreIfExists' ) )
+  return options
+
+
+def _BuildDeleteFileOptions( resource_op ):
+  options = None
+  if 'options' in resource_op:
+    options = responses.DeleteFileOptions(
+      resource_op[ 'options' ].get( 'recursive' ),
+      resource_op[ 'options' ].get( 'ignoreIfNotExists' ) )
+  return options
+
+
 def TextEditToChunks( request_data, uri, text_edit ):
   """Returns a list of FixItChunks from a LSP textEdit."""
   try:
@@ -3580,6 +3623,33 @@ def TextEditToChunks( request_data, uri, text_edit ):
   ]
 
 
+def ResourceOperationToChunk( request_data, resource_op ):
+  """Returns a list of FixItChunks from a LSP CreateFile | RenameFile |
+  DeleteFile."""
+  kind = resource_op[ 'kind' ]
+  if kind == 'create':
+    op = responses.CreateFile( lsp.UriToFilePath( resource_op[ 'uri' ] ),
+                               _BuildCreateFileOptions(resource_op) )
+    filepath = op.path
+  elif kind == 'rename':
+    op = responses.RenameFile( lsp.UriToFilePath( resource_op[ 'oldUri' ] ),
+                               lsp.UriToFilePath( resource_op[ 'newUri' ] ),
+                               _BuildRenameFileOptions(resource_op) )
+    filepath = op.new_path
+  elif kind == 'delete':
+    op = responses.DeleteFile( lsp.UriToFilePath( resource_op[ 'uri' ] ),
+                               _BuildDeleteFileOptions(resource_op) )
+    filepath = op.path
+  else:
+    LOGGER.debug( f'Invalid kind of resource operation: {kind}' )
+    return responses.FixItChunk( '', _BuildRange( [], '', DUMMY_RANGE) )
+
+  contents = GetFileLines( request_data, filepath )
+  return responses.FixItChunk( '',
+                               _BuildRange( contents, filepath, DUMMY_RANGE),
+                               op )
+
+
 def WorkspaceEditToFixIt( request_data,
                           workspace_edit,
                           text='',
@@ -3590,7 +3660,7 @@ def WorkspaceEditToFixIt( request_data,
   if not workspace_edit:
     return None
 
-  if 'changes' in workspace_edit:
+  if 'changes' in workspace_edit and len(workspace_edit['changes']) > 0:
     chunks = []
     # We sort the filenames to make the response stable. Edits are applied in
     # strict sequence within a file, but apply to files in arbitrary order.
@@ -3602,9 +3672,14 @@ def WorkspaceEditToFixIt( request_data,
   else:
     chunks = []
     for text_document_edit in workspace_edit[ 'documentChanges' ]:
-      uri = text_document_edit[ 'textDocument' ][ 'uri' ]
-      edits = text_document_edit[ 'edits' ]
-      chunks.extend( TextEditToChunks( request_data, uri, edits ) )
+      if 'kind' in text_document_edit:
+        chunks.append( ResourceOperationToChunk(
+            request_data,
+            text_document_edit ) )
+      else:
+        uri = text_document_edit[ 'textDocument' ][ 'uri' ]
+        edits = text_document_edit[ 'edits' ]
+        chunks.extend( TextEditToChunks( request_data, uri, edits ) )
   return responses.FixIt(
     responses.Location( request_data[ 'line_num' ],
                         request_data[ 'column_num' ],
